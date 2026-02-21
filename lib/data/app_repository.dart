@@ -519,21 +519,43 @@ class AppRepository {
           y: assignment.y,
         ),
     ];
-    final fromFormation = FormationTemplate.findById(fromFormationId);
-    final fromSlotLabelById = {
-      for (final slot in fromFormation.slots)
-        slot.id: normalizePosition(slot.label),
-    };
+    final pendingPlayers = <String>[];
+    final blockedRestorePlayers = <String>{};
+    final originalTargetPlayers = <String>[];
+    for (final assignment in baseTargetAssignments) {
+      final playerId = assignment.playerId;
+      if (playerId != null && !originalTargetPlayers.contains(playerId)) {
+        originalTargetPlayers.add(playerId);
+      }
+    }
     final toFormation = FormationTemplate.findById(toFormationId);
     final toSlotIdByLabel = <String, String>{};
     for (final slot in toFormation.slots) {
       toSlotIdByLabel.putIfAbsent(normalizePosition(slot.label), () => slot.id);
     }
-    void clearPlayer(String playerId) {
+    int? clearPlayer(String playerId) {
+      int? clearedIndex;
       for (var i = 0; i < nextAssignments.length; i++) {
         if (nextAssignments[i].playerId == playerId) {
           nextAssignments[i] = nextAssignments[i].copyWith(clearPlayer: true);
+          clearedIndex ??= i;
         }
+      }
+      return clearedIndex;
+    }
+
+    bool hasPlayer(String playerId) {
+      for (final assignment in nextAssignments) {
+        if (assignment.playerId == playerId) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    void addPendingPlayer(String playerId) {
+      if (!pendingPlayers.contains(playerId)) {
+        pendingPlayers.add(playerId);
       }
     }
 
@@ -545,27 +567,66 @@ class AppRepository {
           ? mappedTarget
           : toSlotIdByLabel[normalizePosition(_slotLabelFromId(mappedTarget))];
 
-      var playerId = sourcePlayerBySlot[fromSlotId];
-      if (playerId == null) {
-        final slotLabel = fromSlotLabelById[fromSlotId];
-        if (slotLabel != null) {
-          playerId = _findStrictFallbackPlayer(
-            state: state,
-            fromAssignments: fromAssignments,
-            slotLabel: slotLabel,
-          );
-        }
-      }
-      if (playerId == null) {
-        continue;
-      }
+      final playerId = sourcePlayerBySlot[fromSlotId];
       if (targetSlotId == null) {
         continue;
       }
+      if (playerId == null) {
+        for (var i = 0; i < nextAssignments.length; i++) {
+          if (nextAssignments[i].slotId == targetSlotId) {
+            final removed = nextAssignments[i].playerId;
+            if (removed != null) {
+              blockedRestorePlayers.add(removed);
+            }
+            nextAssignments[i] = nextAssignments[i].copyWith(clearPlayer: true);
+            break;
+          }
+        }
+        continue;
+      }
 
-      clearPlayer(playerId);
+      final clearedIndex = clearPlayer(playerId);
       for (var i = 0; i < nextAssignments.length; i++) {
         if (nextAssignments[i].slotId == targetSlotId) {
+          final displacedPlayerId = nextAssignments[i].playerId;
+          nextAssignments[i] = nextAssignments[i].copyWith(playerId: playerId);
+          if (displacedPlayerId != null && displacedPlayerId != playerId) {
+            if (clearedIndex != null &&
+                nextAssignments[clearedIndex].playerId == null) {
+              nextAssignments[clearedIndex] = nextAssignments[clearedIndex]
+                  .copyWith(playerId: displacedPlayerId);
+            } else {
+              addPendingPlayer(displacedPlayerId);
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    for (final playerId in pendingPlayers) {
+      if (blockedRestorePlayers.contains(playerId)) {
+        continue;
+      }
+      if (hasPlayer(playerId)) {
+        continue;
+      }
+      for (var i = 0; i < nextAssignments.length; i++) {
+        if (nextAssignments[i].playerId == null) {
+          nextAssignments[i] = nextAssignments[i].copyWith(playerId: playerId);
+          break;
+        }
+      }
+    }
+    for (final playerId in originalTargetPlayers) {
+      if (blockedRestorePlayers.contains(playerId)) {
+        continue;
+      }
+      if (hasPlayer(playerId)) {
+        continue;
+      }
+      for (var i = 0; i < nextAssignments.length; i++) {
+        if (nextAssignments[i].playerId == null) {
           nextAssignments[i] = nextAssignments[i].copyWith(playerId: playerId);
           break;
         }
@@ -584,33 +645,6 @@ class AppRepository {
       return slotId;
     }
     return slotId.substring(index + 1);
-  }
-
-  String? _findStrictFallbackPlayer({
-    required AppState state,
-    required List<LineupAssignment> fromAssignments,
-    required String slotLabel,
-  }) {
-    for (final assignment in fromAssignments) {
-      final playerId = assignment.playerId;
-      if (playerId == null) {
-        continue;
-      }
-      Player? player;
-      for (final item in state.players) {
-        if (item.id == playerId) {
-          player = item;
-          break;
-        }
-      }
-      if (player == null) {
-        continue;
-      }
-      if (normalizePosition(player.preferredPosition) == slotLabel) {
-        return playerId;
-      }
-    }
-    return null;
   }
 
   _TargetSlot? _takeBestMatchedTargetSlot(

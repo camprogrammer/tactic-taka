@@ -26,6 +26,7 @@ class _BoardScreenState extends ConsumerState<BoardScreen>
   String? _selectedSlotId;
   bool _pathEditMode = false;
   Map<String, Offset> _phaseFromPlayerPositions = const {};
+  Map<String, Offset> _phaseFromSlotPositions = const {};
 
   @override
   void initState() {
@@ -38,7 +39,7 @@ class _BoardScreenState extends ConsumerState<BoardScreen>
     _phaseSwitchController =
         AnimationController(
           vsync: this,
-          duration: const Duration(milliseconds: 420),
+          duration: const Duration(milliseconds: 1200),
         )..addListener(() {
           setState(() {});
         });
@@ -339,13 +340,7 @@ class _BoardScreenState extends ConsumerState<BoardScreen>
     final top = animated.dy * height - markerSize / 2;
     final selected = _selectedSlotId == slot.id;
 
-    final duration = _playbackController.isAnimating
-        ? Duration.zero
-        : const Duration(milliseconds: 220);
-
-    return AnimatedPositioned(
-      duration: duration,
-      curve: Curves.easeInOut,
+    return Positioned(
       left: left,
       top: top,
       child: GestureDetector(
@@ -459,9 +454,12 @@ class _BoardScreenState extends ConsumerState<BoardScreen>
     String slotId,
     LineupAssignment assignment,
   ) {
-    final playerId = assignment.playerId;
-    if (_phaseSwitchController.isAnimating && playerId != null) {
-      final from = _phaseFromPlayerPositions[playerId];
+    if (_phaseSwitchController.isAnimating) {
+      final playerId = assignment.playerId;
+      final from = playerId == null
+          ? _phaseFromSlotPositions[slotId]
+          : (_phaseFromPlayerPositions[playerId] ??
+                _phaseFromSlotPositions[slotId]);
       if (from != null) {
         final t = Curves.easeInOut.transform(_phaseSwitchController.value);
         final x = from.dx + (assignment.x - from.dx) * t;
@@ -510,6 +508,7 @@ class _BoardScreenState extends ConsumerState<BoardScreen>
     }
 
     final fromMap = <String, Offset>{};
+    final fromSlotMap = _buildPhaseSwitchSlotMap(currentState, phase);
     for (final assignment in currentState.assignments) {
       final playerId = assignment.playerId;
       if (playerId != null) {
@@ -519,9 +518,103 @@ class _BoardScreenState extends ConsumerState<BoardScreen>
     setState(() {
       _selectedSlotId = null;
       _phaseFromPlayerPositions = fromMap;
+      _phaseFromSlotPositions = fromSlotMap;
     });
-    _phaseSwitchController.forward(from: 0);
     await ref.read(appControllerProvider.notifier).setActivePhase(phase);
+    if (!mounted) {
+      return;
+    }
+    _phaseSwitchController.forward(from: 0);
+  }
+
+  Map<String, Offset> _buildPhaseSwitchSlotMap(
+    AppState state,
+    String nextPhase,
+  ) {
+    final fromFormationId = state.isAttackPhase
+        ? state.attackFormationId
+        : state.defenseFormationId;
+    final toFormationId = nextPhase == TacticalPhase.attack
+        ? state.attackFormationId
+        : state.defenseFormationId;
+    final toFormation = FormationTemplate.findById(toFormationId);
+    final toSlotIds = toFormation.slots.map((slot) => slot.id).toSet();
+    final toSlotIdByLabel = <String, String>{};
+    for (final slot in toFormation.slots) {
+      toSlotIdByLabel.putIfAbsent(normalizePosition(slot.label), () => slot.id);
+    }
+
+    var mapping = ref
+        .read(appControllerProvider.notifier)
+        .getTransitionMapping(
+          fromFormationId: fromFormationId,
+          toFormationId: toFormationId,
+        );
+    if (mapping.isEmpty) {
+      final reverse = ref
+          .read(appControllerProvider.notifier)
+          .getTransitionMapping(
+            fromFormationId: toFormationId,
+            toFormationId: fromFormationId,
+          );
+      if (reverse.isNotEmpty) {
+        final inverted = <String, String>{};
+        for (final entry in reverse.entries) {
+          inverted[entry.value] = entry.key;
+        }
+        mapping = inverted;
+      }
+    }
+
+    final fromPosBySlot = <String, Offset>{
+      for (final assignment in state.assignments)
+        assignment.slotId: Offset(assignment.x, assignment.y),
+    };
+
+    final result = <String, Offset>{};
+    for (final entry in mapping.entries) {
+      final fromPosition = fromPosBySlot[entry.key];
+      if (fromPosition == null) {
+        continue;
+      }
+      final mappedTarget = entry.value;
+      final targetSlotId = toSlotIds.contains(mappedTarget)
+          ? mappedTarget
+          : toSlotIdByLabel[normalizePosition(_slotLabelFromId(mappedTarget))];
+      if (targetSlotId != null) {
+        result[targetSlotId] = fromPosition;
+      }
+    }
+
+    final sourceByLabel = <String, Offset>{};
+    final fromFormation = FormationTemplate.findById(fromFormationId);
+    for (final slot in fromFormation.slots) {
+      final position = fromPosBySlot[slot.id];
+      if (position != null) {
+        sourceByLabel.putIfAbsent(
+          normalizePosition(slot.label),
+          () => position,
+        );
+      }
+    }
+    for (final slot in toFormation.slots) {
+      if (result.containsKey(slot.id)) {
+        continue;
+      }
+      final fallback = sourceByLabel[normalizePosition(slot.label)];
+      if (fallback != null) {
+        result[slot.id] = fallback;
+      }
+    }
+    return result;
+  }
+
+  String _slotLabelFromId(String slotId) {
+    final index = slotId.lastIndexOf('-');
+    if (index < 0 || index + 1 >= slotId.length) {
+      return slotId;
+    }
+    return slotId.substring(index + 1);
   }
 
   Future<void> _clearCurrentFormationPaths(BuildContext context) async {
